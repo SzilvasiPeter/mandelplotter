@@ -1,56 +1,156 @@
+extern crate sdl2;
 extern crate num_complex;
-extern crate image;
 extern crate rayon;
 
+use sdl2::event::Event;
+use sdl2::keyboard::Keycode;
+use sdl2::pixels::Color;
+use sdl2::render::Canvas;
+use sdl2::video::Window;
 use num_complex::Complex;
-use image::{RgbImage, Rgb};
 use rayon::prelude::*;
-use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-fn mandelbrot_set(c: Complex<f64>, max_iterations: u32) -> bool {
-    let mut z = Complex::new(0.0, 0.0);
+const WINDOW_WIDTH: u32 = 800;
+const WINDOW_HEIGHT: u32 = 600;
+const MAX_ITERATIONS: u32 = 1000;
 
-    for _i in 0..max_iterations {
+const MANDELBROT_X_MIN: f64 = -2.0;
+const MANDELBROT_X_MAX: f64 = 1.0;
+const MANDELBROT_Y_MIN: f64 = -1.5;
+const MANDELBROT_Y_MAX: f64 = 1.5;
+
+fn mandelbrot(c: Complex<f64>) -> u32 {
+    let mut z = Complex { re: 0.0, im: 0.0 };
+    let mut iteration = 0;
+
+    while z.norm_sqr() <= 4.0 && iteration < MAX_ITERATIONS {
         z = z * z + c;
-
-        if z.norm_sqr() > 4.0 {
-            return false;
-        }
+        iteration += 1;
     }
-    
-    return true;
+
+    iteration
 }
 
 fn main() {
-    let width = 800;
-    let height = 800;
-    let max_iterations = 2000;
-    let center_x = -0.5;
-    let center_y = 0.0;
-    let zoom = 2.0;
+    let sdl_context = sdl2::init().unwrap();
+    let video_subsystem = sdl_context.video().unwrap();
 
-    let img = Arc::new(Mutex::new(RgbImage::new(width, height)));
+    let window = video_subsystem
+        .window("Mandelbrot Set", WINDOW_WIDTH, WINDOW_HEIGHT)
+        .position_centered()
+        .build()
+        .unwrap();
 
-    (0..height).into_par_iter().for_each(|y| {
-        for x in 0..width {
-            let cx = center_x + (x as f64 - width as f64 / 2.0) / (width as f64 / 2.0) * zoom;
-            let cy = center_y + (y as f64 - height as f64 / 2.0) / (height as f64 / 2.0) * zoom;
+    let mut canvas: Canvas<Window> = window.into_canvas().build().unwrap();
 
-            let c = Complex::new(cx, cy);
+    let mut event_pump = sdl_context.event_pump().unwrap();
 
-            let color = if mandelbrot_set(c, max_iterations) {
-                Rgb([0, 0, 0]) // Set pixel to black
-            } else {
-                Rgb([255, 255, 255]) // Set pixel to white
-            };
+    let mut zoom_factor = 1.0;
+    let mut pan_x = 0.0;
+    let mut pan_y = 0.0;
 
-            img.lock().unwrap().put_pixel(x, y, color);
+    'main_loop: loop {
+        for event in event_pump.poll_iter() {
+            match event {
+                Event::Quit { .. }
+                | Event::KeyDown {
+                    keycode: Some(Keycode::Escape),
+                    ..
+                } => break 'main_loop,
+                Event::KeyDown {
+                    keycode: Some(Keycode::E),
+                    repeat: false,
+                    ..
+                } => {
+                    // Zoom in by reducing the zoom factor
+                    zoom_factor /= 0.9;
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::Q),
+                    repeat: false,
+                    ..
+                } => {
+                    // Zoom out by increasing the zoom factor
+                    zoom_factor *= 0.9;
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::A),
+                    repeat: false,
+                    ..
+                } => {
+                    // Pan left
+                    pan_x -= 0.1 / zoom_factor;
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::D),
+                    repeat: false,
+                    ..
+                } => {
+                    // Pan right
+                    pan_x += 0.1 / zoom_factor;
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::W),
+                    repeat: false,
+                    ..
+                } => {
+                    // Pan up
+                    pan_y -= 0.1 / zoom_factor;
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::S),
+                    repeat: false,
+                    ..
+                } => {
+                    // Pan down
+                    pan_y += 0.1 / zoom_factor;
+                }
+                _ => {}
+            }
         }
-    });
 
-    // Save the image as a PNG file
-    img.lock()
-        .unwrap()
-        .save("mandelbrot.png")
-        .expect("Failed to save image");
+        // Clear the canvas
+        canvas.set_draw_color(Color::WHITE);
+        canvas.clear();
+
+        // Parallelize the calculation and drawing of the Mandelbrot set
+        let pixels: Vec<(u32, u32, Color)> = (0..WINDOW_WIDTH)
+            .into_par_iter()
+            .flat_map(|px| {
+                (0..WINDOW_HEIGHT).into_par_iter().map(move |py| {
+                    let x = ((px as f64 - WINDOW_WIDTH as f64 / 2.0) / (zoom_factor * WINDOW_WIDTH as f64) + pan_x)
+                        * (MANDELBROT_X_MAX - MANDELBROT_X_MIN)
+                        + (MANDELBROT_X_MAX + MANDELBROT_X_MIN) / 2.0;
+                    let y = ((py as f64 - WINDOW_HEIGHT as f64 / 2.0) / (zoom_factor * WINDOW_HEIGHT as f64) + pan_y)
+                        * (MANDELBROT_Y_MAX - MANDELBROT_Y_MIN)
+                        + (MANDELBROT_Y_MAX + MANDELBROT_Y_MIN) / 2.0;
+
+                    let c = Complex::new(x, y);
+                    let iteration = mandelbrot(c);
+                    
+                    // Set color based on the number of iterations
+                    let color = Color::RGB(
+                        (iteration % 256) as u8,
+                        ((iteration / 8) % 256) as u8,
+                        ((iteration / 16) % 256) as u8,
+                    );
+
+                    (px, py, color)
+                })
+            })
+            .collect();
+
+        // Draw the pixels
+        for (px, py, color) in pixels {
+            canvas.set_draw_color(color);
+            canvas.draw_point((px as i32, py as i32)).unwrap();
+        }
+
+        // Present the canvas
+        canvas.present();
+
+        // Delay to control frame rate (optional)
+        std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
+    }
 }
